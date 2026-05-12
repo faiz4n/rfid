@@ -17,6 +17,8 @@ MFRC522 mfrc522(5, 22);
 // Simple arrays for caching allowed and denied cards offline
 String authCache[50], denyCache[50];
 int authCnt = 0, denyCnt = 0;
+unsigned long lastWiFiAttempt = 0;
+const unsigned long WIFI_RETRY_INTERVAL = 10000; // Retry every 10 seconds
 
 void beep(int pin, int times, int dur) {
   for (int i = 0; i < times; i++) {
@@ -40,30 +42,97 @@ bool inCache(String *arr, int cnt, String u) {
   return false;
 }
 
+void connectToWiFi() {
+  unsigned long now = millis();
+  if (now - lastWiFiAttempt < WIFI_RETRY_INTERVAL) {
+    return; // Too soon to retry
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    lastWiFiAttempt = now;
+    Serial.println("[WiFi] Attempting to connect...");
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n\n=== RFID Attendance System Starting ===");
+  
+  Serial.println("[SETUP] Initializing pins...");
   pinMode(GREEN_LED, OUTPUT); pinMode(RED_LED, OUTPUT); pinMode(BUZZER, OUTPUT);
+  digitalWrite(GREEN_LED, HIGH); delay(200); digitalWrite(GREEN_LED, LOW);
+  Serial.println("[SETUP] LEDs OK");
+  
+  Serial.println("[SETUP] Initializing RFID reader...");
   SPI.begin(18, 19, 23, 5); mfrc522.PCD_Init();
+  Serial.println("[SETUP] RFID OK");
+  
+  Serial.println("[SETUP] Connecting to WiFi...");
+  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  int retries = 20;
+  while (WiFi.status() != WL_CONNECTED && retries--) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[WiFi] Connected! IP: " + WiFi.localIP().toString());
+  } else {
+    Serial.println("\n[WiFi] Connection failed, will retry in loop");
+  }
+  
+  Serial.println("=== Ready to scan cards ===\n");
 }
 
 void loop() {
-  if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) return;
-  if (WiFi.status() != WL_CONNECTED) WiFi.begin(WIFI_SSID, WIFI_PASSWORD); // Reconnect silently
+  // Maintain WiFi connection
+  if (WiFi.status() != WL_CONNECTED) {
+    connectToWiFi();
+    digitalWrite(RED_LED, HIGH); // Red light when no WiFi
+    delay(100);
+    return;
+  }
+  
+  digitalWrite(RED_LED, LOW); // Green light when WiFi OK
+  
+  // Check for card
+  if (!mfrc522.PICC_IsNewCardPresent()) {
+    delay(50);
+    return;
+  }
+  
+  Serial.println("[Card] CARD DETECTED!!!");
+  
+  if (!mfrc522.PICC_ReadCardSerial()) {
+    Serial.println("[Card] Failed to read");
+    return;
+  }
 
   String uid = "";
   for (byte i = 0; i < mfrc522.uid.size; i++) 
     uid += String(mfrc522.uid.uidByte[i], HEX) + (i == mfrc522.uid.size - 1 ? "" : " ");
   uid.toUpperCase();
-  Serial.println("UID Scanned: " + uid);
+  Serial.println("[Card] ✓ UID: " + uid);
 
-  int status = -1; // -1: Network error, 0: Denied, 1: Success, 2: Capture
+  int status = -1;
   if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[API] Sending scan...");
     HTTPClient http;
     http.begin(String(API_BASE_URL) + "/api/attendance/scan");
     http.addHeader("Content-Type", "application/json");
-    if (http.POST("{\"uid\":\"" + uid + "\",\"deviceId\":\"" + String(DEVICE_ID) + "\"}") >= 200) {
+    int httpCode = http.POST("{\"uid\":\"" + uid + "\",\"deviceId\":\"" + String(DEVICE_ID) + "\"}");
+    Serial.println("[API] HTTP: " + String(httpCode));
+    
+    if (httpCode >= 200 && httpCode < 300) {
       String res = http.getString();
+      Serial.println("[API] Response: " + res);
       status = res.indexOf("\"capture\"") > 0 ? 2 : (res.indexOf("\"entered\"") > 0 || res.indexOf("\"exited\"") > 0 ? 1 : 0);
     }
     http.end();
@@ -76,12 +145,23 @@ void loop() {
     rmCache(authCache, authCnt, uid); addCache(denyCache, denyCnt, uid); 
   } else { 
     ok = inCache(authCache, authCnt, uid) && !inCache(denyCache, denyCnt, uid); 
-    Serial.println("No Network/Server - Using Local Cache");
+    Serial.println("[Cache] Using offline cache");
   }
 
   // Visual & Audio Feedback
-  if (status == 2) beep(GREEN_LED, 1, 120); // Capture beep
-  else ok ? beep(GREEN_LED, 1, 200) : beep(RED_LED, 2, 150); // Valid beep vs Deny beeps
+  if (status == 2) {
+    Serial.println("[Beep] CAPTURE");
+    beep(GREEN_LED, 1, 120);
+  }
+  else if (ok) {
+    Serial.println("[Beep] SUCCESS");
+    beep(GREEN_LED, 1, 200);
+  }
+  else {
+    Serial.println("[Beep] DENIED");
+    beep(RED_LED, 2, 150);
+  }
 
-  mfrc522.PICC_HaltA(); delay(200);
+  mfrc522.PICC_HaltA(); 
+  delay(500);
 }
