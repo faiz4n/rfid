@@ -99,11 +99,12 @@ export async function registerScan(req, res) {
       const lastScan = await Attendance.findOne({
         uid: normalizedUID,
         status: { $in: ["entered", "exited"] },
-        scannedAt: { $gte: startOfDay }
+        scannedAt: { $gte: startOfDay },
       }).sort({ scannedAt: -1 });
 
       if (lastScan) {
-        const secondsSinceLast = (scanDate.getTime() - new Date(lastScan.scannedAt).getTime()) / 1000;
+        const secondsSinceLast =
+          (scanDate.getTime() - new Date(lastScan.scannedAt).getTime()) / 1000;
         if (secondsSinceLast < 2) {
           return res.status(200).json({
             message: "Scan ignored (debounced)",
@@ -116,7 +117,7 @@ export async function registerScan(req, res) {
               department: user.department,
               role: user.role,
               cardStatus: user.cardStatus,
-            }
+            },
           });
         }
 
@@ -138,7 +139,9 @@ export async function registerScan(req, res) {
       message: isBlocked
         ? "Card Blocked"
         : user
-          ? currentStatus === "entered" ? "Entered Successfully" : "Exited Successfully"
+          ? currentStatus === "entered"
+            ? "Entered Successfully"
+            : "Exited Successfully"
           : "Access Denied",
       status: attendance.status,
       attendanceId: attendance._id,
@@ -155,7 +158,7 @@ export async function registerScan(req, res) {
       uid: normalizedUID,
       scannedAt: scanDate.toISOString(),
       deviceId: deviceId || "rfid-reader",
-      _id: attendance._id
+      _id: attendance._id,
     };
 
     io.emit("new_scan", payload);

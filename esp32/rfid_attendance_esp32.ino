@@ -9,7 +9,7 @@
 
 const char *WIFI_SSID = "OPPO Reno14 5G";
 const char *WIFI_PASSWORD = "99999999";
-const char *API_BASE_URL = "http://10.85.96.254:5000";
+const char *API_BASE_URL = "http://10.182.172.254:5000";
 const char *DEVICE_ID = "gate-1";
 
 MFRC522 mfrc522(5, 22);
@@ -81,7 +81,7 @@ void loop() {
 
   // Visual & Audio Feedback
   if (status == 2) beep(GREEN_LED, 1, 120); // Capture beep
-  else ok ? beep(GREEN_LED, 1, 500) : beep(RED_LED, 2, 150); // Valid beep vs Deny beeps
+  else ok ? beep(GREEN_LED, 1, 200) : beep(RED_LED, 2, 150); // Valid beep vs Deny beeps
 
   mfrc522.PICC_HaltA(); delay(200);
 }

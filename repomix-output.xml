@@ -1,0 +1,2620 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+backend/.env.example
+backend/package.json
+backend/src/config/db.js
+backend/src/controllers/attendanceController.js
+backend/src/controllers/userController.js
+backend/src/models/Attendance.js
+backend/src/models/User.js
+backend/src/routes/attendanceRoutes.js
+backend/src/routes/userRoutes.js
+backend/src/server.js
+backend/src/utils/uid.js
+esp32/rfid_attendance_esp32.ino
+frontend/.env.example
+frontend/index.html
+frontend/package.json
+frontend/public/rfid-favicon.png
+frontend/src/api/client.js
+frontend/src/App.jsx
+frontend/src/main.jsx
+frontend/src/pages/DashboardPage.jsx
+frontend/src/pages/EnrollPage.jsx
+frontend/src/pages/LogsPage.jsx
+frontend/src/socket.js
+frontend/src/styles.css
+frontend/vite.config.js
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+node_modules/
+.env
+dist/
+build/
+coverage/
+</file>
+
+<file path="backend/.env.example">
+PORT=5000
+MONGO_URI=mongodb://127.0.0.1:27017/rfid
+CORS_ORIGIN=http://localhost:5173
+</file>
+
+<file path="backend/package.json">
+{
+  "name": "rfid-attendance-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "mongoose": "^8.8.2",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}
+</file>
+
+<file path="backend/src/config/db.js">
+import mongoose from "mongoose";
+
+export async function connectDB(mongoUri) {
+  try {
+    await mongoose.connect(mongoUri);
+    console.log("MongoDB connected");
+  } catch (error) {
+    console.error("MongoDB connection error:", error.message);
+    process.exit(1);
+  }
+}
+</file>
+
+<file path="backend/src/controllers/attendanceController.js">
+import { Attendance } from "../models/Attendance.js";
+import { User } from "../models/User.js";
+import { normalizeUID } from "../utils/uid.js";
+import { io } from "../server.js";
+
+const enrollmentCaptureState = {
+  active: false,
+  expiresAt: 0,
+  latest: null,
+};
+
+function isEnrollmentCaptureActive() {
+  if (!enrollmentCaptureState.active) return false;
+  if (Date.now() > enrollmentCaptureState.expiresAt) {
+    enrollmentCaptureState.active = false;
+    enrollmentCaptureState.expiresAt = 0;
+    return false;
+  }
+  return true;
+}
+
+export async function startEnrollmentCapture(req, res) {
+  const timeoutMsRaw = Number(req.body?.timeoutMs);
+  const timeoutMs = Number.isFinite(timeoutMsRaw)
+    ? Math.min(Math.max(timeoutMsRaw, 5000), 120000)
+    : 45000;
+
+  enrollmentCaptureState.active = true;
+  enrollmentCaptureState.expiresAt = Date.now() + timeoutMs;
+  enrollmentCaptureState.latest = null;
+
+  return res.json({
+    active: true,
+    expiresAt: new Date(enrollmentCaptureState.expiresAt).toISOString(),
+    timeoutMs,
+  });
+}
+
+export async function stopEnrollmentCapture(_req, res) {
+  enrollmentCaptureState.active = false;
+  enrollmentCaptureState.expiresAt = 0;
+
+  return res.json({ active: false });
+}
+
+export async function getLatestEnrollmentCapture(_req, res) {
+  return res.json({
+    active: isEnrollmentCaptureActive(),
+    expiresAt: enrollmentCaptureState.expiresAt
+      ? new Date(enrollmentCaptureState.expiresAt).toISOString()
+      : null,
+    latest: enrollmentCaptureState.latest,
+  });
+}
+
+export async function registerScan(req, res) {
+  try {
+    const { uid, deviceId, scannedAt } = req.body;
+
+    if (!uid) {
+      return res.status(400).json({ message: "uid is required" });
+    }
+
+    const normalizedUID = normalizeUID(uid);
+
+    if (isEnrollmentCaptureActive()) {
+      const capturedAt = scannedAt ? new Date(scannedAt) : new Date();
+
+      enrollmentCaptureState.latest = {
+        uid: normalizedUID,
+        deviceId: deviceId || "rfid-reader",
+        scannedAt: capturedAt.toISOString(),
+      };
+
+      enrollmentCaptureState.active = false;
+      enrollmentCaptureState.expiresAt = 0;
+
+      const payload = {
+        message: "UID captured for enrollment",
+        status: "capture",
+        uid: normalizedUID,
+        scannedAt: enrollmentCaptureState.latest.scannedAt,
+      };
+
+      io.emit("scan_captured", payload);
+
+      return res.status(200).json(payload);
+    }
+
+    const user = await User.findOne({ uid: normalizedUID });
+    const isBlocked = user?.cardStatus === "blocked";
+
+    let currentStatus = isBlocked ? "blocked" : user ? "entered" : "unknown";
+    const scanDate = scannedAt ? new Date(scannedAt) : new Date();
+
+    if (user && !isBlocked) {
+      const startOfDay = new Date(scanDate);
+      startOfDay.setHours(0, 0, 0, 0);
+      const lastScan = await Attendance.findOne({
+        uid: normalizedUID,
+        status: { $in: ["entered", "exited"] },
+        scannedAt: { $gte: startOfDay }
+      }).sort({ scannedAt: -1 });
+
+      if (lastScan) {
+        const secondsSinceLast = (scanDate.getTime() - new Date(lastScan.scannedAt).getTime()) / 1000;
+        if (secondsSinceLast < 2) {
+          return res.status(200).json({
+            message: "Scan ignored (debounced)",
+            status: lastScan.status,
+            attendanceId: lastScan._id,
+            user: {
+              id: user._id,
+              name: user.name,
+              uid: user.uid,
+              department: user.department,
+              role: user.role,
+              cardStatus: user.cardStatus,
+            }
+          });
+        }
+
+        if (lastScan.status === "entered") {
+          currentStatus = "exited";
+        }
+      }
+    }
+
+    const attendance = await Attendance.create({
+      user: user?._id ?? null,
+      uid: normalizedUID,
+      status: currentStatus,
+      deviceId: deviceId || "rfid-reader",
+      scannedAt: scanDate,
+    });
+
+    const payload = {
+      message: isBlocked
+        ? "Card Blocked"
+        : user
+          ? currentStatus === "entered" ? "Entered Successfully" : "Exited Successfully"
+          : "Access Denied",
+      status: attendance.status,
+      attendanceId: attendance._id,
+      user: user
+        ? {
+            id: user._id,
+            name: user.name,
+            uid: user.uid,
+            department: user.department,
+            role: user.role,
+            cardStatus: user.cardStatus,
+          }
+        : null,
+      uid: normalizedUID,
+      scannedAt: scanDate.toISOString(),
+      deviceId: deviceId || "rfid-reader",
+      _id: attendance._id
+    };
+
+    io.emit("new_scan", payload);
+
+    return res.status(201).json(payload);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to register scan", error: error.message });
+  }
+}
+
+export async function getRecentAttendance(req, res) {
+  try {
+    const limitParams = Number(req.query.limit);
+    const { date, status } = req.query;
+
+    const filter = {};
+    if (status) {
+      if (status === "valid") {
+        filter.status = { $in: ["entered", "exited"] };
+      } else {
+        filter.status = status;
+      }
+    }
+
+    if (date) {
+      const start = new Date(date);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(date);
+      end.setHours(23, 59, 59, 999);
+      filter.scannedAt = { $gte: start, $lte: end };
+    }
+
+    const finalLimit = date ? 1000 : Math.min(limitParams || 20, 100);
+
+    const records = await Attendance.find(filter)
+      .populate("user", "name uid department role")
+      .sort({ scannedAt: -1 })
+      .limit(finalLimit);
+
+    return res.json(records);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to fetch attendance", error: error.message });
+  }
+}
+
+export async function getTodayStats(req, res) {
+  try {
+    const start = req.query.date ? new Date(req.query.date) : new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start.getTime());
+    end.setHours(23, 59, 59, 999);
+
+    const [totalScans, validScans, unknownScans, blockedScans, uniqueUIDs] =
+      await Promise.all([
+        Attendance.countDocuments({ scannedAt: { $gte: start, $lte: end } }),
+        Attendance.countDocuments({
+          status: { $in: ["entered", "exited"] },
+          scannedAt: { $gte: start, $lte: end },
+        }),
+        Attendance.countDocuments({
+          status: "unknown",
+          scannedAt: { $gte: start, $lte: end },
+        }),
+        Attendance.countDocuments({
+          status: "blocked",
+          scannedAt: { $gte: start, $lte: end },
+        }),
+        Attendance.distinct("uid", { scannedAt: { $gte: start, $lte: end } }),
+      ]);
+
+    return res.json({
+      totalScans,
+      validScans,
+      unknownScans,
+      blockedScans,
+      uniquePeopleToday: uniqueUIDs.length,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to fetch stats", error: error.message });
+  }
+}
+</file>
+
+<file path="backend/src/controllers/userController.js">
+import { User } from "../models/User.js";
+import { normalizeUID } from "../utils/uid.js";
+
+export async function createUser(req, res) {
+  try {
+    const { name, uid, department, role } = req.body;
+
+    if (!name || !uid) {
+      return res.status(400).json({ message: "name and uid are required" });
+    }
+
+    const normalizedUID = normalizeUID(uid);
+
+    const existing = await User.findOne({ uid: normalizedUID });
+    if (existing) {
+      return res.status(409).json({ message: "UID already registered" });
+    }
+
+    const user = await User.create({
+      name,
+      uid: normalizedUID,
+      department,
+      role,
+    });
+
+    return res.status(201).json(user);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to create user", error: error.message });
+  }
+}
+
+export async function getUsers(req, res) {
+  try {
+    const users = await User.find().sort({ createdAt: -1 });
+    return res.json(users);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to fetch users", error: error.message });
+  }
+}
+
+export async function updateUser(req, res) {
+  try {
+    const { id } = req.params;
+    const { name, uid, department, role } = req.body;
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (uid && normalizeUID(uid) !== user.uid) {
+      const normalizedUID = normalizeUID(uid);
+      const existing = await User.findOne({
+        uid: normalizedUID,
+        _id: { $ne: id },
+      });
+      if (existing) {
+        return res.status(409).json({ message: "UID already registered" });
+      }
+      user.uid = normalizedUID;
+    }
+
+    if (name) user.name = name;
+    if (department !== undefined) user.department = department;
+    if (role) user.role = role;
+
+    await user.save();
+    return res.json(user);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to update user", error: error.message });
+  }
+}
+
+export async function blockUserCard(req, res) {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.cardStatus = "blocked";
+    user.blockedAt = new Date();
+    await user.save();
+
+    return res.json({ message: "Card blocked", user });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to block card", error: error.message });
+  }
+}
+
+export async function unblockUserCard(req, res) {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.cardStatus = "active";
+    user.blockedAt = null;
+    await user.save();
+
+    return res.json({ message: "Card unblocked", user });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to unblock card", error: error.message });
+  }
+}
+
+export async function transferUserCard(req, res) {
+  try {
+    const { id } = req.params;
+    const { newUid } = req.body;
+
+    if (!newUid) {
+      return res.status(400).json({ message: "newUid is required" });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const normalizedUID = normalizeUID(newUid);
+    const existing = await User.findOne({
+      uid: normalizedUID,
+      _id: { $ne: id },
+    });
+    if (existing) {
+      return res
+        .status(409)
+        .json({ message: "UID already assigned to another user" });
+    }
+
+    const previousUid = user.uid;
+    user.uid = normalizedUID;
+    user.cardStatus = "active";
+    user.blockedAt = null;
+    await user.save();
+
+    return res.json({
+      message: "Card transferred successfully",
+      previousUid,
+      user,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to transfer card", error: error.message });
+  }
+}
+
+export async function clearUserCard(req, res) {
+  try {
+    const user = await User.findByIdAndDelete(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.json({
+      message: "User and card removed completely",
+      user,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Failed to remove user", error: error.message });
+  }
+}
+</file>
+
+<file path="backend/src/models/Attendance.js">
+import mongoose from "mongoose";
+
+const attendanceSchema = new mongoose.Schema(
+  {
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    uid: {
+      type: String,
+      required: true,
+      uppercase: true,
+      trim: true,
+    },
+    status: {
+      type: String,
+      enum: ["entered", "exited", "unknown", "blocked"],
+      required: true,
+    },
+    deviceId: {
+      type: String,
+      default: "rfid-reader",
+    },
+    scannedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { timestamps: true },
+);
+
+export const Attendance = mongoose.model("Attendance", attendanceSchema);
+</file>
+
+<file path="backend/src/models/User.js">
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    uid: {
+      type: String,
+      required: false,
+      unique: true,
+      sparse: true,
+      uppercase: true,
+      trim: true,
+      default: null,
+    },
+    department: {
+      type: String,
+      default: "General",
+    },
+    role: {
+      type: String,
+      enum: ["student", "staff", "admin"],
+      default: "student",
+    },
+    cardStatus: {
+      type: String,
+      enum: ["active", "blocked"],
+      default: "active",
+    },
+    blockedAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  { timestamps: true },
+);
+
+export const User = mongoose.model("User", userSchema);
+</file>
+
+<file path="backend/src/routes/attendanceRoutes.js">
+import { Router } from "express";
+import {
+  getLatestEnrollmentCapture,
+  getRecentAttendance,
+  getTodayStats,
+  registerScan,
+  startEnrollmentCapture,
+  stopEnrollmentCapture,
+} from "../controllers/attendanceController.js";
+
+const router = Router();
+
+router.post("/scan", registerScan);
+router.post("/capture/start", startEnrollmentCapture);
+router.post("/capture/stop", stopEnrollmentCapture);
+router.get("/capture/latest", getLatestEnrollmentCapture);
+router.get("/recent", getRecentAttendance);
+router.get("/stats/today", getTodayStats);
+
+export default router;
+</file>
+
+<file path="backend/src/routes/userRoutes.js">
+import { Router } from "express";
+import {
+  blockUserCard,
+  clearUserCard,
+  createUser,
+  getUsers,
+  transferUserCard,
+  unblockUserCard,
+  updateUser,
+} from "../controllers/userController.js";
+
+const router = Router();
+
+router.get("/", getUsers);
+router.post("/", createUser);
+router.patch("/:id", updateUser);
+router.post("/:id/block", blockUserCard);
+router.post("/:id/unblock", unblockUserCard);
+router.post("/:id/transfer-card", transferUserCard);
+router.post("/:id/clean-card", clearUserCard);
+
+export default router;
+</file>
+
+<file path="backend/src/server.js">
+import cors from "cors";
+import dotenv from "dotenv";
+import express from "express";
+import { connectDB } from "./config/db.js";
+import attendanceRoutes from "./routes/attendanceRoutes.js";
+import userRoutes from "./routes/userRoutes.js";
+
+dotenv.config();
+
+const app = express();
+
+const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
+const corsOptions = {
+  origin: true, // Allow all origins
+};
+
+app.use(cors(corsOptions));
+app.use(express.json());
+
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, service: "rfid-attendance-api" });
+});
+
+app.use("/api/users", userRoutes);
+app.use("/api/attendance", attendanceRoutes);
+
+import { createServer } from "http";
+import { Server } from "socket.io";
+
+const PORT = Number(process.env.PORT) || 5000;
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  console.error("MONGO_URI is missing in environment variables.");
+  process.exit(1);
+}
+
+const httpServer = createServer(app);
+export const io = new Server(httpServer, {
+  cors: corsOptions,
+});
+
+io.on("connection", (socket) => {
+  console.log("Client connected via WebSocket:", socket.id);
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+  });
+});
+
+connectDB(MONGO_URI).then(() => {
+  httpServer.listen(PORT, () => {
+    console.log(`Server & WebSocket socket.io running on port ${PORT}`);
+  });
+});
+</file>
+
+<file path="backend/src/utils/uid.js">
+export function normalizeUID(uid = "") {
+  const hex = String(uid).replace(/[^a-fA-F0-9]/g, "").toUpperCase();
+  return hex.match(/.{1,2}/g)?.join(" ") || "";
+}
+</file>
+
+<file path="esp32/rfid_attendance_esp32.ino">
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+#define GREEN_LED 2
+#define RED_LED 15
+#define BUZZER 4
+
+const char *WIFI_SSID = "OPPO Reno14 5G";
+const char *WIFI_PASSWORD = "99999999";
+const char *API_BASE_URL = "http://10.85.96.254:5000";
+const char *DEVICE_ID = "gate-1";
+
+MFRC522 mfrc522(5, 22);
+
+// Simple arrays for caching allowed and denied cards offline
+String authCache[50], denyCache[50];
+int authCnt = 0, denyCnt = 0;
+
+void beep(int pin, int times, int dur) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(pin, HIGH); digitalWrite(BUZZER, HIGH); delay(dur);
+    digitalWrite(pin, LOW); digitalWrite(BUZZER, LOW); if (times > 1) delay(50);
+  }
+}
+
+void addCache(String *arr, int &cnt, String u) {
+  for (int i = 0; i < cnt; i++) if (arr[i] == u) return;
+  if (cnt < 50) arr[cnt++] = u;
+}
+
+void rmCache(String *arr, int &cnt, String u) {
+  for (int i = 0; i < cnt; i++) if (arr[i] == u) { arr[i] = arr[--cnt]; return; }
+}
+
+bool inCache(String *arr, int cnt, String u) {
+  if (u == "FE 7E E5 0") return true; // Static fallback
+  for (int i = 0; i < cnt; i++) if (arr[i] == u) return true;
+  return false;
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(GREEN_LED, OUTPUT); pinMode(RED_LED, OUTPUT); pinMode(BUZZER, OUTPUT);
+  SPI.begin(18, 19, 23, 5); mfrc522.PCD_Init();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+}
+
+void loop() {
+  if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) return;
+  if (WiFi.status() != WL_CONNECTED) WiFi.begin(WIFI_SSID, WIFI_PASSWORD); // Reconnect silently
+
+  String uid = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) 
+    uid += String(mfrc522.uid.uidByte[i], HEX) + (i == mfrc522.uid.size - 1 ? "" : " ");
+  uid.toUpperCase();
+  Serial.println("UID Scanned: " + uid);
+
+  int status = -1; // -1: Network error, 0: Denied, 1: Success, 2: Capture
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(String(API_BASE_URL) + "/api/attendance/scan");
+    http.addHeader("Content-Type", "application/json");
+    if (http.POST("{\"uid\":\"" + uid + "\",\"deviceId\":\"" + String(DEVICE_ID) + "\"}") >= 200) {
+      String res = http.getString();
+      status = res.indexOf("\"capture\"") > 0 ? 2 : (res.indexOf("\"entered\"") > 0 || res.indexOf("\"exited\"") > 0 ? 1 : 0);
+    }
+    http.end();
+  }
+
+  bool ok = false;
+  if (status == 1 || status == 2) { 
+    ok = true; rmCache(denyCache, denyCnt, uid); addCache(authCache, authCnt, uid); 
+  } else if (status == 0) { 
+    rmCache(authCache, authCnt, uid); addCache(denyCache, denyCnt, uid); 
+  } else { 
+    ok = inCache(authCache, authCnt, uid) && !inCache(denyCache, denyCnt, uid); 
+    Serial.println("No Network/Server - Using Local Cache");
+  }
+
+  // Visual & Audio Feedback
+  if (status == 2) beep(GREEN_LED, 1, 120); // Capture beep
+  else ok ? beep(GREEN_LED, 1, 500) : beep(RED_LED, 2, 150); // Valid beep vs Deny beeps
+
+  mfrc522.PICC_HaltA(); delay(200);
+}
+</file>
+
+<file path="frontend/.env.example">
+VITE_API_URL=http://localhost:5000/api
+</file>
+
+<file path="frontend/index.html">
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart RFID Attendance Management System</title>
+    <link rel="icon" type="image/png" href="/rfid-favicon.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+</file>
+
+<file path="frontend/package.json">
+{
+  "name": "rfid-attendance-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
+    "vite": "^5.4.10"
+  }
+}
+</file>
+
+<file path="frontend/src/api/client.js">
+import axios from "axios";
+
+export const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:5000/api`,
+});
+</file>
+
+<file path="frontend/src/App.jsx">
+import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { RiRfidFill } from "react-icons/ri";
+import DashboardPage from "./pages/DashboardPage";
+import EnrollPage from "./pages/EnrollPage";
+import LogsPage from "./pages/LogsPage";
+
+export default function App() {
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <div className="brand-logo">
+            <RiRfidFill size={40} />
+          </div>
+          <div className="brand-text">
+            <h2>Smart RFID</h2>
+            <p>Admin Portal</p>
+          </div>
+        </div>
+        <p className="sidebar-label">Navigation</p>
+        <nav className="sidebar-nav">
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) =>
+              isActive ? "sidebar-link active" : "sidebar-link"
+            }
+          >
+            Dashboard
+          </NavLink>
+          <NavLink
+            to="/students"
+            className={({ isActive }) =>
+              isActive ? "sidebar-link active" : "sidebar-link"
+            }
+          >
+            Student Management
+          </NavLink>
+          <NavLink
+            to="/logs"
+            className={({ isActive }) =>
+              isActive ? "sidebar-link active" : "sidebar-link"
+            }
+          >
+            System Logs
+          </NavLink>
+        </nav>
+      </aside>
+
+      <div className="layout-shell">
+        <header className="topbar">
+          <div>
+            <h1>Attendance Management System</h1>
+            <p className="eyebrow">Smart RFID Project Database</p>
+          </div>
+        </header>
+        
+        <main className="content-shell">
+          <Routes>
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/students" element={<EnrollPage />} />
+            <Route path="/logs" element={<LogsPage />} />
+            <Route
+              path="/enroll"
+              element={<Navigate to="/students" replace />}
+            />
+          </Routes>
+        </main>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/src/main.jsx">
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App";
+import "./styles.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>,
+);
+</file>
+
+<file path="frontend/src/pages/DashboardPage.jsx">
+import { useEffect, useMemo, useState } from "react";
+import { api } from "../api/client";
+import { socket } from "../socket.js";
+
+function StatCard({ label, value, tone }) {
+  return (
+    <article className={`stat-card ${tone}`}>
+      <p>{label}</p>
+      <h3>{value}</h3>
+    </article>
+  );
+}
+
+export default function DashboardPage() {
+  const [stats, setStats] = useState({
+    totalScans: 0,
+    validScans: 0,
+    unknownScans: 0,
+    blockedScans: 0,
+    uniquePeopleToday: 0,
+  });
+  const [recent, setRecent] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectedDate, setSelectedDate] = useState(() => {
+    const d = new Date();
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    return d.toISOString().split("T")[0];
+  });
+
+  async function loadData() {
+    try {
+      setLoading(true);
+      setError("");
+      const [statsRes, recentRes] = await Promise.all([
+        api.get(`/attendance/stats/today?date=${selectedDate}`),
+        api.get(`/attendance/recent?status=valid&limit=15&date=${selectedDate}`),
+      ]);
+
+      setStats(statsRes.data);
+      setRecent(recentRes.data);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed to load dashboard data");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadData();
+
+    function onNewScan(payload) {
+      const d = new Date();
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      const todayString = d.toISOString().split("T")[0];
+      
+      if (selectedDate !== todayString) return;
+
+      if (payload.status === "entered" || payload.status === "exited") {
+        setRecent(prev => [payload, ...prev].slice(0, 15));
+      }
+      
+      setStats(s => ({
+        ...s,
+        totalScans: s.totalScans + 1,
+        validScans: (payload.status === "entered" || payload.status === "exited") ? s.validScans + 1 : s.validScans,
+        unknownScans: payload.status === "unknown" ? s.unknownScans + 1 : s.unknownScans,
+        blockedScans: payload.status === "blocked" ? s.blockedScans + 1 : s.blockedScans,
+      }));
+    }
+
+    socket.on("new_scan", onNewScan);
+    return () => socket.off("new_scan", onNewScan);
+  }, [selectedDate]);
+
+  const successRate = useMemo(() => {
+    if (!stats.totalScans) return "0%";
+    return `${Math.round((stats.validScans / stats.totalScans) * 100)}%`;
+  }, [stats.validScans, stats.totalScans]);
+
+  return (
+    <section className="dashboard-grid">
+      <div className="stats-grid">
+        <StatCard
+          label="Total Scans Today"
+          value={stats.totalScans}
+          tone="neutral"
+        />
+        <StatCard label="Valid Scans" value={stats.validScans} tone="good" />
+        <StatCard label="Unknown Cards" value={stats.unknownScans} tone="bad" />
+        <StatCard
+          label="Blocked Card Hits"
+          value={stats.blockedScans}
+          tone="bad"
+        />
+        <StatCard
+          label="Unique People"
+          value={stats.uniquePeopleToday}
+          tone="neutral"
+        />
+      </div>
+
+      <section className="panel flex-panel">
+        <div className="panel-header">
+          <h2>Live Validated Attendance</h2>
+          <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
+            <input 
+              type="date" 
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              style={{ padding: "0.25rem" }}
+            />
+            <button onClick={loadData} className="btn ghost" type="button">
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {loading && <p className="muted">Loading scans...</p>}
+        {error && <p className="error">{error}</p>}
+
+        {!loading && !error && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Name</th>
+                  <th>UID</th>
+                  <th>Status</th>
+                  <th>Device</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent.map((entry) => (
+                  <tr key={entry._id}>
+                    <td>{new Date(entry.scannedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}</td>
+                    <td>
+                      {entry.status === "blocked"
+                        ? entry.user?.name || "Blocked Card"
+                        : entry.user?.name || "Unknown Card"}
+                    </td>
+                    <td>{entry.uid}</td>
+                    <td>
+                      <span className={`badge ${entry.status}`}>
+                        {entry.status}
+                      </span>
+                    </td>
+                    <td>{entry.deviceId}</td>
+                  </tr>
+                ))}
+                {!recent.length && (
+                  <tr>
+                    <td colSpan="5" className="muted">
+                      No scans available yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+</file>
+
+<file path="frontend/src/pages/EnrollPage.jsx">
+import { useEffect, useState } from "react";
+import { api } from "../api/client";
+import { socket } from "../socket.js";
+
+const initialAddForm = { name: "", uid: "", department: "", role: "student" };
+const initialEditForm = { name: "", uid: "", department: "", role: "student" };
+
+const formatUID = (val) => {
+  const hex = val.replace(/[^a-fA-F0-9]/g, "").toUpperCase();
+  return hex.match(/.{1,2}/g)?.join(" ") || "";
+};
+
+export default function EnrollPage() {
+  const [activeTab, setActiveTab] = useState("directory");
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  // Add form state
+  const [addForm, setAddForm] = useState(initialAddForm);
+  const [addScanning, setAddScanning] = useState(false);
+
+  // Edit form state
+  const [editForm, setEditForm] = useState(initialEditForm);
+  const [editingId, setEditingId] = useState("");
+  const [editScanning, setEditScanning] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const filteredUsers = users.filter(
+    (u) =>
+      u.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (u.uid && u.uid.toLowerCase().includes(searchQuery.toLowerCase()))
+  );
+
+  // Card controls state
+  const [transferTarget, setTransferTarget] = useState(null);
+  const [transferUid, setTransferUid] = useState("");
+  const [transferScanning, setTransferScanning] = useState(false);
+
+  const [scanHint, setScanHint] = useState("");
+
+  const stats = {
+    total: users.length,
+    active: users.filter((u) => u.cardStatus !== "blocked").length,
+    blocked: users.filter((u) => u.cardStatus === "blocked").length,
+  };
+
+  async function loadUsers() {
+    try {
+      const res = await api.get("/users");
+      setUsers(res.data);
+    } catch {
+      setUsers([]);
+    }
+  }
+
+  useEffect(() => {
+    loadUsers();
+  }, []);
+
+  // Socket effects for scanning forms
+  useEffect(() => {
+    if (!addScanning && !transferScanning) return;
+    
+    function onCapture(payload) {
+      if (payload.uid) {
+        if (addScanning) {
+          setAddForm((p) => ({ ...p, uid: payload.uid }));
+          setScanHint(`UID: ${payload.uid}`);
+          setAddScanning(false);
+        } else if (transferScanning) {
+          setTransferUid(payload.uid);
+          setScanHint(`UID: ${payload.uid}`);
+          setTransferScanning(false);
+        }
+        api.post("/attendance/capture/stop").catch(() => {});
+      }
+    }
+
+    socket.on("scan_captured", onCapture);
+    return () => socket.off("scan_captured", onCapture);
+  }, [addScanning, transferScanning]);
+
+  async function startScan(mode) {
+    try {
+      setScanHint("Scan mode active...");
+      await api.post("/attendance/capture/start", { timeoutMs: 30000 });
+      if (mode === "add") setAddScanning(true);
+      else if (mode === "transfer") setTransferScanning(true);
+    } catch {
+      setScanHint("Scan failed");
+    }
+  }
+
+  async function stopScan() {
+    try {
+      await api.post("/attendance/capture/stop");
+    } catch {}
+    setAddScanning(false);
+    setTransferScanning(false);
+    setScanHint("");
+  }
+
+  async function addStudent(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      await api.post("/users", addForm);
+      setMessage("✓ Added");
+      setAddForm(initialAddForm);
+      loadUsers();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function updateStudent(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      await api.patch(`/users/${editingId}`, editForm);
+      setMessage("✓ Updated");
+      setEditingId("");
+      setEditForm(initialEditForm);
+      loadUsers();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function selectEdit(user) {
+    setEditingId(user._id);
+    setEditForm({
+      name: user.name,
+      uid: user.uid || "",
+      department: user.department || "",
+      role: user.role || "student",
+    });
+  }
+
+  async function toggleBlock(user) {
+    setError("");
+    setMessage("");
+    try {
+      if (user.cardStatus === "blocked") {
+        await api.post(`/users/${user._id}/unblock`);
+        setMessage(`✓ Unblocked ${user.name}`);
+      } else {
+        await api.post(`/users/${user._id}/block`);
+        setMessage(`✓ Blocked ${user.name}`);
+      }
+      loadUsers();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed");
+    }
+  }
+
+  async function transferCard(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      await api.post(`/users/${transferTarget._id}/transfer-card`, {
+        newUid: transferUid,
+      });
+      setMessage(`✓ Transferred`);
+      setTransferTarget(null);
+      setTransferUid("");
+      loadUsers();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function cleanCard(user) {
+    if (!window.confirm(`Are you sure you want to completely remove ${user.name}?`)) return;
+    setError("");
+    setMessage("");
+    try {
+      await api.post(`/users/${user._id}/clean-card`);
+      setMessage(`✓ Removed ${user.name}`);
+      if (editingId === user._id) {
+        setEditingId("");
+        setEditForm(initialEditForm);
+      }
+      loadUsers();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed");
+    }
+  }
+
+  return (
+    <section className="enroll-container">
+      {/* Header */}
+      <div className="enroll-header">
+        <div className="enroll-title-row">
+          <h2>Student Management</h2>
+          <div className="stats-row">
+            <span className="stat-item">
+              <strong>{stats.total}</strong> total
+            </span>
+            <span className="stat-item good">
+              <strong>{stats.active}</strong> active
+            </span>
+            <span className="stat-item bad">
+              <strong>{stats.blocked}</strong> blocked
+            </span>
+          </div>
+        </div>
+
+        <div className="tabs-row">
+          {["directory", "add", "edit", "controls"].map((tab) => (
+            <button
+              key={tab}
+              className={`tab-btn ${activeTab === tab ? "active" : ""}`}
+              onClick={() => {
+                setActiveTab(tab);
+                setEditingId("");
+                setSearchQuery("");
+                setError("");
+                setMessage("");
+              }}
+            >
+              {tab === "directory"
+                ? "Directory"
+                : tab === "add"
+                  ? "Add Student"
+                  : tab === "edit"
+                    ? "Edit Student"
+                    : "Controls"}
+            </button>
+          ))}
+        </div>
+
+        {message && <p className="msg-success">{message}</p>}
+        {error && <p className="msg-error">{error}</p>}
+      </div>
+
+      {/* Directory Tab */}
+      {activeTab === "directory" && (
+        <div className="enroll-section directory-section">
+          <table className="student-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>UID</th>
+                <th>Dept</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th style={{ width: "100px" }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((user) => (
+                <tr key={user._id}>
+                  <td>{user.name}</td>
+                  <td className="uid-cell">{user.uid || "—"}</td>
+                  <td>{user.department || "—"}</td>
+                  <td>{user.role}</td>
+                  <td>
+                    <span
+                      className={`badge ${user.cardStatus === "blocked" ? "blocked" : "present"}`}
+                    >
+                      {user.cardStatus || "active"}
+                    </span>
+                  </td>
+                  <td>
+                    <div className="action-buttons">
+                      <button
+                        className="btn-mini"
+                        onClick={() => {
+                          selectEdit(user);
+                          setActiveTab("edit");
+                        }}
+                      >
+                        Edit →
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!users.length && <p className="empty-msg">No students yet</p>}
+        </div>
+      )}
+
+      {/* Add Tab */}
+      {activeTab === "add" && (
+        <div className="enroll-section add-section">
+          <div className="id-card-layout">
+            <div className="id-card-preview-wrapper">
+              <div className={`digital-id-card ${addForm.role}`}>
+                <div className="id-card-header">
+                  <div className="chip-icon"></div>
+                  <span className="university-label">UNIVERSITY ID</span>
+                </div>
+                <div className="id-card-body">
+                  <div className="id-avatar-large">
+                    {addForm.name ? addForm.name.charAt(0).toUpperCase() : "?"}
+                  </div>
+                  <div className="id-info">
+                    <h2>{addForm.name || "Student Name"}</h2>
+                    <p className="role-text">{addForm.role.toUpperCase()}</p>
+                    <p className="dept-text">{addForm.department || "Department"}</p>
+                  </div>
+                </div>
+                <div className="id-card-footer">
+                  <span className="uid-label">CARD UID</span>
+                  <span className="uid-value">{addForm.uid || "TAP TO SCAN"}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="id-card-form-wrapper panel">
+              <h3>Enroll New Student</h3>
+              <form onSubmit={addStudent} className="compact-form">
+                <input
+                  placeholder="Full Name"
+                  value={addForm.name}
+                  onChange={(e) =>
+                    setAddForm((p) => ({ ...p, name: e.target.value }))
+                  }
+                  required
+                />
+                <div className="uid-input-group">
+                  <input
+                    placeholder="e.g. 93 35 6A 1D"
+                    value={addForm.uid}
+                    onChange={(e) =>
+                      setAddForm((p) => ({ ...p, uid: formatUID(e.target.value) }))
+                    }
+                    required
+                  />
+                  {!addScanning ? (
+                    <button
+                      type="button"
+                      className="btn-scan"
+                      onClick={() => startScan("add")}
+                    >
+                      Scan
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-scan danger"
+                      onClick={stopScan}
+                    >
+                      Stop
+                    </button>
+                  )}
+                </div>
+                {scanHint && <span className="hint">{scanHint}</span>}
+                <input
+                  placeholder="Department"
+                  value={addForm.department}
+                  onChange={(e) =>
+                    setAddForm((p) => ({ ...p, department: e.target.value }))
+                  }
+                />
+                <select
+                  value={addForm.role}
+                  onChange={(e) =>
+                    setAddForm((p) => ({ ...p, role: e.target.value }))
+                  }
+                >
+                  <option value="student">Student</option>
+                  <option value="staff">Staff</option>
+                  <option value="admin">Admin</option>
+                </select>
+                <button type="submit" className="btn-primary" disabled={loading}>
+                  {loading ? "Enrolling..." : "Enroll Student"}
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Tab */}
+      {activeTab === "edit" && (
+        <div className="enroll-section edit-section">
+          {!editingId ? (
+            <div className="edit-directory">
+              <div className="search-bar-wrap">
+                <input 
+                  type="text" 
+                  placeholder="Search students to edit..." 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="search-input"
+                />
+              </div>
+              <div className="student-grid-premium">
+                {filteredUsers.map(user => (
+                  <div key={user._id} className="premium-user-card" onClick={() => selectEdit(user)}>
+                    <div className="avatar-circle">
+                      {user.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="user-details-mini">
+                      <h4>{user.name}</h4>
+                      <p>{user.role} • {user.department || "No Dept"}</p>
+                    </div>
+                    <div className="card-hover-action">Edit ✨</div>
+                  </div>
+                ))}
+                {!filteredUsers.length && <p className="muted">No students found.</p>}
+              </div>
+            </div>
+          ) : (
+            <div className="edit-detail-view">
+              <button 
+                className="btn ghost" 
+                style={{ marginBottom: '16px' }}
+                onClick={() => { setEditingId(""); setMessage(""); setError(""); }}
+              >
+                ← Back to Selection
+              </button>
+              
+              <div className="id-card-layout">
+                <div className="id-card-preview-wrapper">
+                  <div className={`digital-id-card ${editForm.role}`}>
+                    <div className="id-card-header">
+                      <div className="chip-icon"></div>
+                      <span className="university-label">UNIVERSITY ID</span>
+                    </div>
+                    <div className="id-card-body">
+                      <div className="id-avatar-large">
+                        {editForm.name ? editForm.name.charAt(0).toUpperCase() : "?"}
+                      </div>
+                      <div className="id-info">
+                        <h2>{editForm.name || "Student Name"}</h2>
+                        <p className="role-text">{editForm.role.toUpperCase()}</p>
+                        <p className="dept-text">{editForm.department || "Department"}</p>
+                      </div>
+                    </div>
+                    <div className="id-card-footer">
+                      <span className="uid-label">CARD UID</span>
+                      <span className="uid-value">{editForm.uid || "NO CARD"}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="id-card-form-wrapper panel">
+                  <h3>Update Identity</h3>
+                  <form onSubmit={updateStudent} className="compact-form">
+                    <label>
+                      Full Name
+                      <input
+                        placeholder="Name"
+                        value={editForm.name}
+                        onChange={(e) =>
+                          setEditForm((p) => ({ ...p, name: e.target.value }))
+                        }
+                        required
+                      />
+                    </label>
+
+                    <label>
+                      Department
+                      <input
+                        placeholder="Department"
+                        value={editForm.department}
+                        onChange={(e) =>
+                          setEditForm((p) => ({ ...p, department: e.target.value }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Role Status
+                      <select
+                        value={editForm.role}
+                        onChange={(e) =>
+                          setEditForm((p) => ({ ...p, role: e.target.value }))
+                        }
+                      >
+                        <option value="student">Student</option>
+                        <option value="staff">Staff</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </label>
+                    <div className="btn-group" style={{ marginTop: '10px' }}>
+                      <button type="submit" className="btn-primary" disabled={loading}>
+                        {loading ? "Saving..." : "Save Changes"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        onClick={() => { setEditingId(""); setMessage(""); setError(""); }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Controls Tab */}
+      {activeTab === "controls" && (
+        <div className="enroll-section controls-section">
+          <div className="control-col">
+            <h3>Transfer Card</h3>
+            {transferTarget ? (
+              <div className="transfer-info">
+                <p>
+                  Student: <strong>{transferTarget.name}</strong>
+                </p>
+              </div>
+            ) : (
+              <p className="hint-text">Select a student from Directory</p>
+            )}
+            <form onSubmit={transferCard} className="compact-form">
+              <div className="uid-input-group">
+                <input
+                  placeholder="e.g. 93 35 6A 1D"
+                  value={transferUid}
+                  onChange={(e) => setTransferUid(formatUID(e.target.value))}
+                  required
+                  disabled={!transferTarget}
+                />
+                {!transferScanning ? (
+                  <button
+                    type="button"
+                    className="btn-scan"
+                    onClick={() => startScan("transfer")}
+                    disabled={!transferTarget}
+                  >
+                    Scan
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-scan danger"
+                    onClick={stopScan}
+                  >
+                    Stop
+                  </button>
+                )}
+              </div>
+              {scanHint && <span className="hint">{scanHint}</span>}
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={loading || !transferTarget}
+              >
+                {loading ? "Transferring..." : "Transfer"}
+              </button>
+              {transferTarget && (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setTransferTarget(null)}
+                >
+                  Clear
+                </button>
+              )}
+            </form>
+          </div>
+
+          <div className="control-col">
+            <h3>Block / Unblock</h3>
+            <div className="user-list-compact">
+              {users.map((user) => (
+                <div className="user-item-compact" key={user._id}>
+                  <div>
+                    <strong>{user.name}</strong>
+                    <p className="uid-small">{user.uid || "NO CARD"}</p>
+                  </div>
+                  <div className="compact-actions">
+                    <button
+                      className={`btn-mini ${user.cardStatus === "blocked" ? "" : "danger"}`}
+                      onClick={() => toggleBlock(user)}
+                    >
+                      {user.cardStatus === "blocked" ? "Unblock" : "Block"}
+                    </button>
+                    <button
+                      className="btn-mini"
+                      onClick={() => {
+                        setTransferTarget(user);
+                      }}
+                    >
+                      Xfer
+                    </button>
+                    <button
+                      className="btn-mini danger"
+                      onClick={() => cleanCard(user)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+</file>
+
+<file path="frontend/src/pages/LogsPage.jsx">
+import { useEffect, useState } from "react";
+import { api } from "../api/client";
+import { socket } from "../socket.js";
+
+export default function LogsPage() {
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectedDate, setSelectedDate] = useState(() => {
+    const d = new Date();
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    return d.toISOString().split("T")[0];
+  });
+
+  async function loadLogs() {
+    try {
+      setLoading(true);
+      setError("");
+      const res = await api.get(`/attendance/recent?limit=200&date=${selectedDate}`);
+      setLogs(res.data);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Failed to load logs");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadLogs();
+
+    function onNewScan(payload) {
+      const d = new Date();
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      const todayString = d.toISOString().split("T")[0];
+      
+      if (selectedDate === todayString) {
+        setLogs(prev => [payload, ...prev].slice(0, 200));
+      }
+    }
+    
+    socket.on("new_scan", onNewScan);
+    return () => socket.off("new_scan", onNewScan);
+  }, [selectedDate]);
+
+  return (
+    <section className="dashboard-grid">
+      <section className="panel flex-panel">
+        <div className="panel-header">
+          <h2>System Logs</h2>
+          <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
+            <input 
+              type="date" 
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              style={{ padding: "0.25rem" }}
+            />
+            <button onClick={loadLogs} className="btn ghost" type="button">
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {loading && <p className="muted">Loading logs...</p>}
+        {error && <p className="error">{error}</p>}
+
+        {!loading && !error && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Name</th>
+                  <th>UID</th>
+                  <th>Status</th>
+                  <th>Device</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logs.map((entry) => (
+                  <tr key={entry._id}>
+                    <td>{new Date(entry.scannedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}</td>
+                    <td>
+                      {entry.status === "blocked"
+                        ? entry.user?.name || "Blocked Card"
+                        : entry.user?.name || "Unknown Card"}
+                    </td>
+                    <td>{entry.uid}</td>
+                    <td>
+                      <span className={`badge ${entry.status}`}>
+                        {entry.status}
+                      </span>
+                    </td>
+                    <td>{entry.deviceId}</td>
+                  </tr>
+                ))}
+                {!logs.length && (
+                  <tr>
+                    <td colSpan="5" className="muted">
+                      No logs available for selected date.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+</file>
+
+<file path="frontend/src/socket.js">
+import { io } from "socket.io-client";
+
+// Extract base URL without /api path
+const apiUrl = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:5000/api`;
+const baseUrl = apiUrl.replace(/\/api\/?$/, ""); // Remove /api suffix
+
+export const socket = io(baseUrl, {
+  autoConnect: true,
+  reconnection: true,
+});
+</file>
+
+<file path="frontend/src/styles.css">
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+
+:root {
+  --app-bg: #f3f4f6;
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-hover: #f1f5f9;
+  --text: #0f172a;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --surface-active: #e0e7ff;
+  
+  --good: #10b981;
+  --good-bg: #d1fae5;
+  --bad: #ef4444;
+  --bad-bg: #fee2e2;
+  --neutral: #3b82f6;
+  --neutral-bg: #dbeafe;
+  --warning: #f59e0b;
+  --warning-bg: #fef3c7;
+
+  --sidebar-bg: #0f172a;
+  --sidebar-text: #94a3b8;
+  --sidebar-text-hover: #f8fafc;
+  --sidebar-active-bg: rgba(255,255,255,0.1);
+
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.05);
+  --shadow-lg: 0 12px 24px rgba(0,0,0,0.06);
+  
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--app-bg);
+  color: var(--text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -0.02em; }
+p { margin: 0; }
+a { text-decoration: none; color: inherit; display: inline-block; }
+button { font-family: inherit; }
+
+/* SHELL LAYOUT */
+.app-shell {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+.sidebar {
+  width: 260px;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 40px;
+}
+
+.brand-logo {
+  width: 40px; height: 40px;
+  color: white;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.25rem; font-weight: 800;
+}
+
+.brand-text h2 { color: white; font-size: 1.1rem; }
+.brand-text p { font-size: 0.75rem; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px;}
+
+.sidebar-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  margin-bottom: 12px;
+  color: #475569;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-link {
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  color: var(--sidebar-text);
+  font-weight: 500;
+  font-size: 0.95rem;
+  transition: all 0.2s ease;
+}
+
+.sidebar-link:hover {
+  background: var(--sidebar-active-bg);
+  color: var(--sidebar-text-hover);
+}
+
+.sidebar-link.active {
+  background: var(--primary);
+  color: white;
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2);
+}
+
+.layout-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.topbar {
+  padding: 14px 32px;
+  background: rgba(243, 244, 246, 0.8);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  z-index: 5;
+}
+
+.topbar h1 { font-size: 1.2rem; color: var(--text); }
+.topbar .eyebrow { font-size: 0.75rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
+
+.content-shell {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 32px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* PANELS & CARDS */
+.flex-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin-bottom: 0;
+}
+
+.panel {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.panel-header h2 { font-size: 1.1rem; }
+
+.dashboard-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.stat-card p {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.stat-card h3 {
+  font-size: 1.6rem;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.stat-card::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px;
+}
+.stat-card.neutral::before { background: var(--primary); }
+.stat-card.good::before { background: var(--good); }
+.stat-card.bad::before { background: var(--bad); }
+
+/* TABLES */
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  flex: 1;
+  overflow-y: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  text-align: left;
+}
+
+th {
+  padding: 8px 12px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 2;
+}
+
+td {
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--surface-hover); }
+
+.uid-cell {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+}
+
+/* BADGES */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.badge.entered, .badge.present { background: var(--good-bg); color: #065f46; }
+.badge.exited { background: var(--surface-active); color: var(--primary-hover); }
+.badge.blocked { background: var(--bad-bg); color: #991b1b; }
+.badge.unknown { background: var(--warning-bg); color: #92400e; }
+.badge.active { background: var(--neutral-bg); color: #1e40af; }
+
+/* FORMS & BUTTONS */
+input, select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  color: var(--text);
+  background: var(--surface);
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+.btn-primary, .btn-secondary, .btn-scan, .btn, .btn-mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s ease;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+  box-shadow: 0 4px 10px rgba(79, 70, 229, 0.2);
+}
+
+.btn-primary:hover {
+  background: var(--primary-hover);
+  box-shadow: 0 6px 14px rgba(79, 70, 229, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.btn-secondary, .btn.ghost {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.btn-secondary:hover, .btn.ghost:hover {
+  background: var(--surface-hover);
+  border-color: #cbd5e1;
+}
+
+.btn-scan {
+  background: var(--text);
+  color: white;
+  padding: 10px 16px;
+}
+.btn-scan.danger { background: var(--bad); }
+
+.btn-mini {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.btn-mini:hover { background: var(--surface-hover); }
+.btn-mini.danger { color: var(--bad); border-color: var(--bad-bg); }
+.btn-mini.danger:hover { background: var(--bad-bg); }
+
+.action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-group { display: flex; gap: 12px; }
+
+/* ERROR & MESSAGES */
+.error, .msg-error { color: var(--bad); font-weight: 500; font-size: 0.9rem; }
+.msg-success { color: var(--good); font-weight: 500; font-size: 0.9rem; }
+.muted { color: var(--muted); }
+.hint { font-size: 0.8rem; color: var(--primary); font-weight: 600; }
+
+/* ENROLL PAGE & TABS */
+.enroll-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.enroll-header {
+  background: var(--surface);
+  padding: 16px 20px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.enroll-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.enroll-title-row h2 { font-size: 1.5rem; }
+
+.stats-row { display: flex; gap: 16px; }
+.stat-item { padding: 6px 12px; border-radius: var(--radius-sm); font-size: 0.85rem; font-weight: 600; background: var(--surface-hover); }
+.stat-item.good { color: var(--good); background: var(--good-bg); }
+.stat-item.bad { color: var(--bad); background: var(--bad-bg); }
+
+.tabs-row {
+  display: flex;
+  gap: 8px;
+  background: var(--bg);
+  padding: 6px;
+  border-radius: var(--radius-md);
+  width: fit-content;
+}
+
+.tab-btn {
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.enroll-section {
+  background: transparent;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.directory-section { background: var(--surface); border-radius: var(--radius-lg); border: 1px solid var(--border); padding: 8px 20px; flex: 1; min-height: 0; overflow-y: auto; }
+
+/* COMPACT FORM */
+.compact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.compact-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.uid-input-group {
+  display: flex;
+  gap: 12px;
+}
+
+/* CONTROLS AREA */
+.controls-section { display: grid; grid-template-columns: 1fr 1.5fr; gap: 24px; }
+.control-col { background: var(--surface); padding: 24px; border-radius: var(--radius-lg); border: 1px solid var(--border); }
+.control-col h3 { margin-bottom: 20px; font-size: 1.25rem; }
+.transfer-info { padding: 12px; background: var(--primary-light); border-radius: var(--radius-sm); margin-bottom: 16px; }
+
+.user-list-compact { display: flex; flex-direction: column; gap: 12px; max-height: 500px; overflow-y: auto; }
+.user-item-compact { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); }
+.user-item-compact strong { font-size: 0.95rem; }
+.uid-small { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--muted); margin: 2px 0 0; }
+.compact-actions { display: flex; gap: 8px; }
+
+/* --- PREMIUM ID CARD & GRID LOGIC (Integrated from previous iteration) --- */
+.edit-directory {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+.student-grid-premium {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-auto-rows: max-content;
+  gap: 12px;
+  margin-top: 8px;
+  overflow-y: auto;
+  flex: 1 1 0px;
+  padding-bottom: 16px;
+  padding-right: 8px;
+}
+.premium-user-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+  text-align: center;
+}
+.premium-user-card:hover {
+  transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: #cbd5e1;
+}
+.avatar-circle {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), var(--primary-hover));
+  color: white; display: flex; align-items: center; justify-content: center;
+  font-size: 1.75rem; font-weight: 700; flex-shrink: 0;
+  margin-bottom: 4px;
+}
+.user-details-mini h4 { margin: 0; font-size: 1.1rem; color: var(--text); }
+.user-details-mini p { margin: 2px 0 0; font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.card-hover-action {
+  position: absolute; bottom: 0; left: 0; right: 0; padding: 12px;
+  background: var(--primary); color: white; text-align: center; opacity: 0;
+  transform: translateY(100%); font-size: 0.85rem; font-weight: 600;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.premium-user-card:hover .card-hover-action { opacity: 1; transform: translateY(0); }
+
+.search-bar-wrap { margin-bottom: 20px; }
+.search-input {
+  width: 100%; max-width: 400px; padding: 12px 16px; border-radius: 12px;
+  border: 1px solid var(--border); font-size: 0.95rem; box-shadow: var(--shadow-sm); transition: box-shadow 0.2s ease;
+}
+.search-input:focus { box-shadow: 0 0 0 3px var(--primary-light); border-color: var(--primary); }
+
+.edit-detail-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.id-card-layout {
+  display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; margin-top: 4px;
+  animation: fade-up 0.4s ease forwards;
+  flex: 1;
+  min-height: 0;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.digital-id-card {
+  background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
+  border-radius: 20px; padding: 24px;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,1);
+  border: 1px solid rgba(255,255,255,0.8);
+  position: relative; overflow: hidden; display: flex; flex-direction: column; gap: 20px;
+}
+.digital-id-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 6px; background: var(--primary); }
+.digital-id-card.student::before { background: #3b82f6; }
+.digital-id-card.staff::before { background: #10b981; }
+.digital-id-card.admin::before { background: #8b5cf6; }
+
+.id-card-header { display: flex; justify-content: space-between; align-items: center; }
+.chip-icon {
+  width: 36px; height: 28px; background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
+  border-radius: 6px; opacity: 0.9; position: relative;
+}
+.chip-icon::after { content: ""; position: absolute; inset: 4px; border: 2px solid rgba(255,255,255,0.6); border-radius: 2px; }
+.university-label { font-size: 0.7rem; font-weight: 800; color: var(--muted); letter-spacing: 0.15em; }
+
+.id-card-body { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 16px; margin: 10px 0; }
+.id-avatar-large {
+  width: 96px; height: 96px; border-radius: 50%; background: #f1f5f9;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 2.5rem; font-weight: 700; color: var(--primary);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04); border: 4px solid white;
+}
+.id-info h2 { font-size: 1.4rem; color: var(--text); margin-bottom: 4px; }
+.id-info .role-text { font-size: 0.75rem; font-weight: 800; letter-spacing: 0.1em; color: var(--primary); margin: 0; }
+.id-info .dept-text { font-size: 0.85rem; color: var(--muted); margin: 4px 0 0; }
+
+.id-card-footer { margin-top: auto; padding-top: 16px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 4px; }
+.uid-label { font-size: 0.65rem; font-weight: 700; color: var(--muted); letter-spacing: 0.05em; }
+.uid-value { font-family: "JetBrains Mono", monospace; font-size: 1.1rem; font-weight: 600; color: var(--text); letter-spacing: 0.05em; }
+
+.id-card-form-wrapper { padding: 20px !important; overflow-y: auto; max-height: 100%; }
+.id-card-form-wrapper h3 { font-size: 1.15rem; margin-bottom: 16px; }
+
+@media (max-width: 800px) { 
+  .id-card-layout { grid-template-columns: 1fr; } 
+  .sidebar { width: 80px; padding: 16px; }
+  .brand-text, .sidebar-label { display: none; }
+  .tabs-row { flex-wrap: wrap; }
+}
+
+@media (max-width: 600px) {
+  .app-shell { flex-direction: column; }
+  .sidebar { width: 100%; height: auto; padding: 16px; flex-direction: row; justify-content: space-around; }
+  .sidebar-nav { flex-direction: row; }
+  .topbar { padding: 16px 20px; }
+  .content-shell { padding: 20px; }
+}
+</file>
+
+<file path="frontend/vite.config.js">
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    host: "0.0.0.0",
+    port: 5173,
+  },
+});
+</file>
+
+<file path="README.md">
+# Smart RFID Attendance Management (MERN)
+
+This project is a MERN-based dashboard for your ESP32 + MFRC522 RFID attendance system.
+
+## Project Structure
+
+- `backend`: Express + MongoDB API for users and attendance scans
+- `frontend`: React + Vite dashboard for stats, recent scans, and user enrollment
+
+## 1) Backend Setup
+
+```bash
+cd backend
+npm install
+copy .env.example .env
+```
+
+Update `.env` values:
+
+- `MONGO_URI`: your MongoDB connection string
+- `PORT`: backend port (default 5000)
+
+Run backend:
+
+```bash
+npm run dev
+```
+
+## 2) Frontend Setup
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Dashboard runs on `http://localhost:5173` by default.
+
+## API Overview
+
+- `GET /api/health`
+- `POST /api/attendance/scan` -> create attendance from RFID UID
+- `GET /api/attendance/recent?limit=20`
+- `GET /api/attendance/stats/today`
+- `POST /api/users`
+- `GET /api/users`
+
+## ESP32 Integration
+
+When card is scanned, send UID to backend endpoint:
+
+`POST http://<YOUR_SERVER_IP>:5000/api/attendance/scan`
+
+Body:
+
+```json
+{
+  "uid": "FE 7E E5 0",
+  "deviceId": "gate-1"
+}
+```
+
+If UID exists in users table, attendance status is `present`, otherwise `unknown`.
+
+## 3) ESP32 Configuration
+
+Use the ready sketch at:
+
+- `esp32/rfid_attendance_esp32.ino`
+
+Before uploading, update these constants in the sketch:
+
+- `WIFI_SSID`
+- `WIFI_PASSWORD`
+- `API_BASE_URL` (example: `http://192.168.1.10:5000`)
+- `DEVICE_ID` (example: `gate-1`)
+
+Important:
+
+- ESP32 and your backend server must be on the same WiFi network.
+- Keep backend running on port `5000`.
+- Enroll card UID from dashboard exactly as ESP32 prints it on Serial Monitor.
+
+Expected behavior:
+
+- Server returns `present` -> green LED + long beep
+- Server returns `unknown` -> red LED + two short beeps
+</file>
+
+</files>

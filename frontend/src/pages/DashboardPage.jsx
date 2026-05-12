@@ -53,19 +53,24 @@ export default function DashboardPage() {
       const d = new Date();
       d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
       const todayString = d.toISOString().split("T")[0];
-      
+
       if (selectedDate !== todayString) return;
 
       if (payload.status === "entered" || payload.status === "exited") {
-        setRecent(prev => [payload, ...prev].slice(0, 15));
+        setRecent((prev) => [payload, ...prev].slice(0, 15));
       }
-      
-      setStats(s => ({
+
+      setStats((s) => ({
         ...s,
         totalScans: s.totalScans + 1,
-        validScans: (payload.status === "entered" || payload.status === "exited") ? s.validScans + 1 : s.validScans,
-        unknownScans: payload.status === "unknown" ? s.unknownScans + 1 : s.unknownScans,
-        blockedScans: payload.status === "blocked" ? s.blockedScans + 1 : s.blockedScans,
+        validScans:
+          payload.status === "entered" || payload.status === "exited"
+            ? s.validScans + 1
+            : s.validScans,
+        unknownScans:
+          payload.status === "unknown" ? s.unknownScans + 1 : s.unknownScans,
+        blockedScans:
+          payload.status === "blocked" ? s.blockedScans + 1 : s.blockedScans,
       }));
     }
 
@@ -104,8 +109,8 @@ export default function DashboardPage() {
         <div className="panel-header">
           <h2>Live Validated Attendance</h2>
           <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
-            <input 
-              type="date" 
+            <input
+              type="date"
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
               style={{ padding: "0.25rem" }}
@@ -134,7 +139,14 @@ export default function DashboardPage() {
               <tbody>
                 {recent.map((entry) => (
                   <tr key={entry._id}>
-                    <td>{new Date(entry.scannedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}</td>
+                    <td>
+                      {new Date(entry.scannedAt).toLocaleTimeString("en-US", {
+                        hour: "numeric",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        hour12: true,
+                      })}
+                    </td>
                     <td>
                       {entry.status === "blocked"
                         ? entry.user?.name || "Blocked Card"
