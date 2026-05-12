@@ -9,7 +9,7 @@
 
 const char *WIFI_SSID = "OPPO Reno14 5G";
 const char *WIFI_PASSWORD = "99999999";
-const char *API_BASE_URL = "http://10.182.172.254:5000";
+const char *API_BASE_URL = "https://rfid-backend-nic6.onrender.com";
 const char *DEVICE_ID = "gate-1";
 
 MFRC522 mfrc522(5, 22);
